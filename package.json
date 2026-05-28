@@ -1,0 +1,15 @@
+{
+  "name": "atm-formulario08-extractor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Extractor deterministico de PDFs Formulario 08 a plantilla Excel.",
+  "scripts": {
+    "extractor": "node src/extract-formulario08.js",
+    "extract-f08": "node src/extract-formulario08.js",
+    "test": "node src/extract-formulario08.js --test-normalizers"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
