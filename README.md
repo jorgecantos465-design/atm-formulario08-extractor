@@ -1,11 +1,29 @@
 # Extractor Formulario 08
 
-MVP deterministico para leer un PDF de Formulario 08 y completar la fila 2 de una copia de una plantilla Excel existente.
+MVP deterministico para leer Formularios 08 digitales y completar una copia de una plantilla existente.
+
+## Alcance arquitectonico
+
+Este repositorio procesa exclusivamente PDFs digitales con texto embebido.
+
+Pipeline permitido:
+
+```text
+PDF digital -> pdf-parse -> normalizacion -> regex/parser -> mapeo -> plantilla de salida
+```
+
+Reglas obligatorias:
+
+- No usar OpenAI Vision ni modelos multimodales.
+- No usar servicios de IA paga.
+- No incorporar OCR para formularios manuscritos.
+- Mantener extraccion deterministica mediante `pdf-parse`, regex y parser.
+- Derivar formularios manuscritos o escaneados a `atm-formulario08-extractor-manuscrito`.
 
 ## Estructura
 
 - `input/`: colocar un solo PDF de prueba.
-- `templates/`: colocar exactamente una plantilla `.xlsx` o `.xlsm`.
+- `templates/`: colocar una plantilla `.xlsx`, `.xlsm` o `.ods`.
 - `src/`: codigo del extractor.
 - `output/`: se guarda la copia Excel completada.
 - `logs/`: se guarda el log de campos encontrados y no encontrados.
@@ -51,4 +69,4 @@ npm run extractor
 
 ## Nota sobre ODS
 
-El MVP rechaza `.ods` para no reescribirlo con una libreria que pueda alterar estructura o estilos. Para esta primera version, usar `.xlsx` o `.xlsm`.
+El extractor admite `.ods` y preserva la estructura existente mediante actualizacion acotada del XML interno. No reemplazar esta ruta por una conversion destructiva de formato.

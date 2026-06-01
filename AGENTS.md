@@ -2,7 +2,15 @@
 
 ## Objetivo del proyecto
 
-Extractor deterministico para leer PDFs de Formulario 08 y completar la fila 2 de una copia de una plantilla Excel existente, respetando placeholders y estructura del archivo.
+Extractor deterministico exclusivo para Formularios 08 digitales. Lee texto embebido del PDF y completa una copia de la plantilla existente, respetando placeholders y estructura del archivo.
+
+## Limite arquitectonico obligatorio
+
+- Este repositorio procesa solo formularios digitales con texto embebido.
+- La extraccion debe mantenerse deterministica: `pdf-parse` -> normalizacion -> regex/parser -> mapeo -> salida.
+- Esta prohibido agregar OpenAI Vision, cualquier modelo multimodal o servicios de IA paga.
+- Esta prohibido incorporar OCR para resolver formularios manuscritos dentro de este repositorio.
+- Los formularios manuscritos o escaneados pertenecen a `atm-formulario08-extractor-manuscrito`.
 
 ## Stack tecnico detectado
 
@@ -10,6 +18,8 @@ Extractor deterministico para leer PDFs de Formulario 08 y completar la fila 2 d
 - JavaScript CommonJS
 - `pdf-parse` para lectura de PDF
 - `exceljs` para manipular `.xlsx`/`.xlsm`
+- `jszip` para preservar y completar plantillas `.ods`
+- Regex y parser deterministico para detectar campos
 - Scripts CLI por npm
 
 ## Comandos
@@ -37,7 +47,9 @@ Extractor deterministico para leer PDFs de Formulario 08 y completar la fila 2 d
 - No borrar archivos de `input/` o `templates/`.
 - No cambiar encabezados, placeholders ni fila objetivo de la plantilla sin autorizacion.
 - Mantener comportamiento deterministico: no inventar datos y registrar faltantes.
-- Preservar rechazo de `.ods` salvo decision explicita.
+- No agregar Vision, IA paga ni llamadas a APIs externas.
+- No mezclar logica del extractor manuscrito en este repositorio.
+- Preservar soporte existente de `.ods` sin alterar estructura ni formulas.
 
 ## No tocar sin autorizacion
 

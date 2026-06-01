@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const assert = require("node:assert/strict");
 const ExcelJS = require("exceljs");
 const JSZip = require("jszip");
 const pdfParse = require("pdf-parse");
@@ -148,12 +149,23 @@ function firstMatch(text, regex) {
   return match ? match[1].trim() : "";
 }
 
+function isValidCuit(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (digits.length !== 11) return false;
+
+  const weights = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+  const sum = weights.reduce((total, weight, index) => total + Number(digits[index]) * weight, 0);
+  const remainder = 11 - (sum % 11);
+  const checkDigit = remainder === 11 ? 0 : remainder === 10 ? 9 : remainder;
+  return checkDigit === Number(digits[10]);
+}
+
 function cleanCuit(value) {
   const digits = String(value || "")
     .replace(/[Ii]/g, "1")
     .replace(/[Ss]/g, "5")
     .replace(/\D/g, "");
-  if (digits.length !== 11) return "";
+  if (!isValidCuit(digits)) return "";
   return `${digits.slice(0, 2)}-${digits.slice(2, 10)}-${digits.slice(10)}`;
 }
 
@@ -287,7 +299,7 @@ function cleanVehicleValue(value) {
 
 function cleanPersonName(value) {
   const cleaned = String(value || "")
-    .replace(/\s+\/?X\s*$/i, "")
+    .replace(/\s+\/?\s*(?:X|Y)\s*$/i, "")
     .replace(/\s+/g, " ")
     .replace(/[^A-ZÁÉÍÓÚÑÜ, .'-]/gi, "")
     .trim();
@@ -628,6 +640,7 @@ function cleanEmail(value) {
   const compact = String(value || "")
     .replace(/\((?:S|A|@)\)/gi, "@")
     .replace(/\s+/g, "")
+    .replace(/(\.(?:COM|NET|ORG|GOB|GOV|EDU|AR))(?=REPRESENTANTE|ESTADOCIVIL|CONYUGE|DOMICILIO|CUIT|CUIL|DNI)/gi, "$1 ")
     .replace(/[<()[\]{}]/g, "")
     .replace(/mailto:/gi, "")
     .replace(/[;,]+$/g, "");
@@ -843,7 +856,23 @@ function extractFormulario08(text, pdfName, log) {
 
 function classifyDocument(text) {
   const compact = stripAccents(compactText(text)).toUpperCase();
-  if (/08\s*-\s*D/.test(compact) || /\bF\s*0?8\s*D\b/.test(compact) || /LUGAR\s*Y?\s*FECHA\s+DE\s+IMPRESI/.test(compact)) {
+  const hasBuyerSection = /\bCOMPRADORES?\s+ADQUIRENTE/.test(compact);
+  const hasSellerSection = /\bVENDEDOR.*TRANSMITENTE/.test(compact);
+  const structuralSignals = [
+    /\bDOMINIO\s*:/,
+    /\bMONTO(?:\s+DE)?\s+OPERACI[O0]N\s*:/,
+    hasBuyerSection,
+    hasSellerSection,
+    /\bNUMERO\s+MOTOR\s*:/,
+    /\bNUMERO\s+CHASIS\s*:/,
+  ];
+  const structuralScore = structuralSignals.filter((signal) => (signal instanceof RegExp ? signal.test(compact) : signal)).length;
+  if (
+    /08\s*-\s*D/.test(compact) ||
+    /\bF\s*0?8\s*D\b/.test(compact) ||
+    /LUGAR\s*Y?\s*FECHA\s+DE\s+IMPRESI/.test(compact) ||
+    (structuralScore >= 4 && hasBuyerSection && hasSellerSection)
+  ) {
     return "F08D";
   }
   return "MANUSCRITO";
@@ -1224,21 +1253,29 @@ async function writeOdsWorkbook(templatePath, rowsData, log) {
   return outPath;
 }
 
-function printNormalizerTests() {
-  const amountInputs = ["100.000", "100,000", "7.000.000", "$ 7.000.000,00", "'100000", "10000000,0"];
-  const dateInputs = ["'04/11/2025", "04/11/2025", "Mendoza, 04 de noviembre de 2025"];
+function runNormalizerTests() {
+  assert.equal(normalize_amount("100.000"), 100000);
+  assert.equal(normalize_amount("$ 7.000.000,00"), 7000000);
+  assert.equal(normalize_date("Mendoza, 04 de noviembre de 2025"), "04/11/2025");
 
-  console.log("AMOUNT");
-  for (const input of amountInputs) {
-    const output = normalize_amount(input);
-    console.log(`${input} -> ${output} -> ${typeof output}`);
-  }
+  assert.equal(cleanCuit("20-13149070-5"), "20-13149070-5");
+  assert.equal(cleanCuit("20-I3I49070-S"), "20-13149070-5");
+  assert.equal(cleanCuit("02-61594881-9"), "");
 
-  console.log("DATE");
-  for (const input of dateInputs) {
-    const output = normalize_date(input);
-    console.log(`${input} -> ${output} -> ${typeof output}`);
-  }
+  const malformedF08d =
+    "Dominio: IOC072 Modelo: VOYAGE 1.6 Ano: 2010 Lugar y Fecha de impresari del 080: " +
+    "Monto Operacion: 8000000,0 Numero Motor: CFZ734965 Numero Chasis: 9BWDB05UXAT181377 " +
+    "COMPRADORES ADQUIRENTE/S VENDEDOR/ES o TRANSMITENTE/S";
+  const genericVehicle =
+    "Dominio: ABC123 Monto Operacion: 100000 Numero Motor: MOTOR123 Numero Chasis: CHASIS123";
+
+  assert.equal(classifyDocument("08-D"), "F08D");
+  assert.equal(classifyDocument("Lugar y Fecha de impresion del 08D:"), "F08D");
+  assert.equal(classifyDocument(malformedF08d), "F08D");
+  assert.equal(classifyDocument(genericVehicle), "MANUSCRITO");
+  assert.equal(classifyDocument("Dominio: IOC072"), "MANUSCRITO");
+
+  console.log("Normalizer assertions passed.");
 }
 
 async function main() {
@@ -1347,7 +1384,7 @@ async function main() {
 }
 
 if (process.argv.includes("--test-normalizers")) {
-  printNormalizerTests();
+  runNormalizerTests();
 } else {
   main().catch((error) => {
     console.error(`ERROR: ${error.message}`);
