@@ -1,5 +1,7 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const { spawnSync } = require("child_process");
 const assert = require("node:assert/strict");
 const ExcelJS = require("exceljs");
 const JSZip = require("jszip");
@@ -17,6 +19,7 @@ const OSD_DATE_PLACEHOLDER = "@atributo17@";
 const AMOUNT_PLACEHOLDER = "@atributo33@";
 const DATE_PLACEHOLDERS = new Set([OSD_DATE_PLACEHOLDER, "@atributo30@"]);
 const CUIT_REGEX = /(?:^|[^\d])(\d{2}\s*[- ]?\s*[0-9S]{8}\s*[- ]?\s*[0-9I])(?=$|[^\d])/gi;
+const OCR_TEXT_THRESHOLD = 1000;
 const MONTHS_ES = {
   enero: "01",
   febrero: "02",
@@ -71,6 +74,98 @@ const FIELDS = {
 function ensureDirs() {
   for (const dir of [INPUT_DIR, OUTPUT_DIR, TEMPLATE_DIR, LOG_DIR]) {
     fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function executableFromWhere(name) {
+  const result = spawnSync("where.exe", [name], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) return "";
+  return String(result.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
+}
+
+function findExecutable(name, envName, knownPaths = []) {
+  const configured = process.env[envName];
+  if (configured && fs.existsSync(configured)) return configured;
+
+  const fromPath = executableFromWhere(name);
+  if (fromPath) return fromPath;
+
+  for (const candidate of knownPaths) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return "";
+}
+
+function findPdftoppm() {
+  const wingetRoot = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, "Microsoft", "WinGet", "Packages")
+    : "";
+  const candidates = [];
+  if (wingetRoot && fs.existsSync(wingetRoot)) {
+    for (const entry of fs.readdirSync(wingetRoot).filter((item) => item.startsWith("oschwartz10612.Poppler_"))) {
+      const packageRoot = path.join(wingetRoot, entry);
+      for (const versionDir of fs.readdirSync(packageRoot)) {
+        candidates.push(path.join(packageRoot, versionDir, "Library", "bin", "pdftoppm.exe"));
+      }
+    }
+  }
+  return findExecutable("pdftoppm.exe", "PDFTOPPM_PATH", candidates);
+}
+
+function findTesseract() {
+  return findExecutable("tesseract.exe", "TESSERACT_PATH", [
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "Tesseract-OCR", "tesseract.exe") : "",
+  ]);
+}
+
+function runExternal(executable, args) {
+  const result = spawnSync(executable, args, {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${path.basename(executable)} termino con codigo ${result.status}: ${String(result.stderr || "").trim()}`);
+  }
+  return String(result.stdout || "");
+}
+
+function evaluateTextQuality(text) {
+  const characters = normalizeText(text).length;
+  if (characters === 0) return 'EMPTY';
+  if (characters < OCR_TEXT_THRESHOLD) return 'DEGRADED';
+  return 'GOOD';
+}
+
+function ocrPdf(pdfPath) {
+  const pdftoppm = findPdftoppm();
+  const tesseract = findTesseract();
+  if (!pdftoppm || !tesseract) {
+    const missing = [!pdftoppm && "pdftoppm", !tesseract && "tesseract"].filter(Boolean).join(" y ");
+    throw new Error(`fallback OCR no disponible: falta ${missing}`);
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "atm-f08-ocr-"));
+  try {
+    const prefix = path.join(tempDir, "page");
+    runExternal(pdftoppm, ["-png", "-r", "300", pdfPath, prefix]);
+    const images = fs.readdirSync(tempDir)
+      .filter((name) => /^page-\d+\.png$/i.test(name))
+      .sort((left, right) => Number(left.match(/\d+/)[0]) - Number(right.match(/\d+/)[0]));
+    if (images.length === 0) throw new Error("pdftoppm no genero imagenes");
+
+    const recognize = (psm) => images.map((image) =>
+      runExternal(tesseract, [path.join(tempDir, image), "stdout", "-l", "eng", "--psm", String(psm)])
+    ).join("\n");
+    return {
+      layoutText: recognize(11),
+      blockText: recognize(3),
+      pdftoppm,
+      tesseract,
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -228,11 +323,13 @@ function extractPartialCuitAfterLabel(text, labelRegex) {
 }
 
 function cleanDomain(value) {
-  const matches = String(value || "").matchAll(/\b[A-Z]{3}\s*-?\s*\d{3}\b|\b[A-Z]{2}\s*-?\s*\d{3}\s*-?\s*[A-Z]{2}\b/gi);
+  const matches = String(value || "").matchAll(
+    /\b[A-Z]{3}\s*-?\s*\d{3}\b|\b\d{3}\s*-?\s*[A-Z]{3}\b|\b[A-Z]{2}\s*-?\s*\d{3}\s*-?\s*[A-Z]{2}\b/gi
+  );
   for (const match of matches) {
     const domain = match[0].replace(/[^A-Z0-9]/gi, "").toUpperCase();
     if (/^DEL0?80$/.test(domain)) continue;
-    if (/^[A-Z]{3}\d{3}$/.test(domain) || /^[A-Z]{2}\d{3}[A-Z]{2}$/.test(domain)) return domain;
+    if (/^(?:[A-Z]{3}\d{3}|\d{3}[A-Z]{3}|[A-Z]{2}\d{3}[A-Z]{2})$/.test(domain)) return domain;
   }
   return "";
 }
@@ -240,6 +337,7 @@ function cleanDomain(value) {
 function cleanMoney(value) {
   const match = String(value || "")
     .replace(/[tT](?=\d{3}\b)/g, ".")
+    .replace(/(\d)[OoG](?=\d)/g, (_match, digit) => `${digit}0`)
     .match(/\$?\s*(?:\d{1,3}(?:[.\s]\d{3})+(?:,\d+)?|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[,.]\d+)?)/);
   if (!match) return "";
   return normalize_amount(match[0]) ?? "";
@@ -428,6 +526,12 @@ function valueAfterRegex(text, labelRegex, stopRegexes) {
 
 function extractMontoOperacion(text) {
   const source = compactText(text);
+  const ocrLabel = source.match(/M[o0]nt[oe](?:\s+de)?\s+Operaci.{0,2}n\s*:?\s*/i);
+  if (ocrLabel) {
+    const ocrValue = cleanMoney(source.slice(ocrLabel.index + ocrLabel[0].length, ocrLabel.index + ocrLabel[0].length + 80));
+    if (ocrValue) return ocrValue;
+  }
+
   const label = source.match(/Monto(?:\s+de)?\s+Operaci[oó0d]n\s*:?\s*|Monto(?:\s+de)?\s+Operacion\s*:?\s*|Monto\s*:?\s*/i);
   if (label) {
     const afterLabel = source.slice(label.index + label[0].length, label.index + label[0].length + 80);
@@ -541,6 +645,7 @@ function valueBetweenFlexibleLabels(text, labelRegex, stopRegexes) {
 function extractModel(sectionA) {
   const modelLabel = /(?:M[o0]d[e3][l1I][o0©]|ModeIo|Mode1o|Modeto|Modelo)\s*:?\s*/i;
   const nextVehicleLabel = [
+    /N.mero\s+Cha\b/i,
     /(?:A(?:ñ|n|fi|fl|f|Ã±)i?o|Anio|Aflo)\s*:?\s*/i,
     /N[uú]mero\s+Motor\s*:?\s*/i,
     /Numero\s+Motor\s*:?\s*/i,
@@ -756,20 +861,8 @@ function extractFormulario08(text, pdfName, log) {
     [/GRAVAMENES/, /OBSERVACIONES/, /CEDULAS/, /C.DULAS/]
   );
 
-  console.log(`OCR RAW VEHICULO (${pdfName}):`);
-  console.log(sectionA);
-  console.log(`OCR RAW VENDEDOR (${pdfName}):`);
-  console.log(sellerSection);
   const emailBlock = [buyerSection, sellerSection].filter(Boolean).join("\n");
   const osdBlock = sectionA;
-  console.log(`OCR RAW EMAIL (${pdfName}):`);
-  console.log(emailBlock);
-  console.log(`OCR RAW OSD (${pdfName}):`);
-  console.log(osdBlock);
-  log.push({ pdf: pdfName, phase: "ocr_raw_vehicle_block", status: "capturado", value: sectionA });
-  log.push({ pdf: pdfName, phase: "ocr_raw_seller_block", status: "capturado", value: sellerSection });
-  log.push({ pdf: pdfName, phase: "ocr_raw_email_block", status: "capturado", value: emailBlock });
-  log.push({ pdf: pdfName, phase: "ocr_raw_osd_block", status: "capturado", value: osdBlock });
 
   const buyerCuit =
     extractCuitAfterLabel(buyerSection, /CUIT\s*:?\s*/i) ||
@@ -884,6 +977,27 @@ function emptyFieldMap() {
     fields[placeholder] = "";
   }
   return fields;
+}
+
+function mergeFieldCandidates(candidates, pdfName, log) {
+  const merged = emptyFieldMap();
+  for (const [field, placeholder] of Object.entries(FIELDS)) {
+    const selected = candidates.find((candidate) => {
+      const value = candidate.fields[placeholder];
+      return value !== "" && value != null;
+    });
+    if (selected) merged[placeholder] = selected.fields[placeholder];
+    log.push({
+      pdf: pdfName,
+      phase: "extract",
+      field,
+      placeholder,
+      status: selected ? "encontrado" : "no encontrado",
+      value: selected ? selected.fields[placeholder] : "",
+      source: selected ? selected.source : "",
+    });
+  }
+  return merged;
 }
 
 function extractFormulario08Partial(text, pdfName, log) {
@@ -1257,6 +1371,12 @@ function runNormalizerTests() {
   assert.equal(normalize_amount("100.000"), 100000);
   assert.equal(normalize_amount("$ 7.000.000,00"), 7000000);
   assert.equal(normalize_date("Mendoza, 04 de noviembre de 2025"), "04/11/2025");
+  assert.equal(cleanDomain("282JGQ"), "282JGQ");
+  assert.equal(cleanMoney("6060G000,0"), 60600000);
+  const degradedDigital = "COMPRADORES ADQUIRENTE/S VENDEDOR TRANSMITENTE Modelo: Z1000";
+  assert.equal(evaluateTextQuality(''), 'EMPTY');
+  assert.equal(evaluateTextQuality(degradedDigital), 'DEGRADED');
+  assert.equal(evaluateTextQuality(`${degradedDigital} ${'texto '.repeat(200)}`), 'GOOD');
 
   assert.equal(cleanCuit("20-13149070-5"), "20-13149070-5");
   assert.equal(cleanCuit("20-I3I49070-S"), "20-13149070-5");
@@ -1305,14 +1425,6 @@ async function main() {
     try {
       const parsed = await pdfParse(fs.readFileSync(pdfPath));
       const text = parsed.text || "";
-      console.log(`OCR RAW (${pdfName}):`);
-      console.log(text);
-      log.push({
-        pdf: pdfName,
-        phase: "ocr_raw",
-        status: "capturado",
-        value: text,
-      });
       const globalCuits = findCuits(text);
       log.push({
         pdf: pdfName,
@@ -1320,7 +1432,53 @@ async function main() {
         status: globalCuits.length ? "encontrado" : "no encontrado",
         value: globalCuits.join(", "),
       });
-      const documentType = classifyDocument(text);
+      let documentType = classifyDocument(text);
+      let rowData;
+      let ocrUsed = false;
+      const textQuality = evaluateTextQuality(text);
+      log.push({
+        pdf: pdfName,
+        phase: "pdf_parse",
+        status: "capturado",
+        value: { characters: text.length, pages: parsed.numpages || 0, quality: textQuality },
+      });
+      if (textQuality !== 'GOOD') {
+        try {
+          const ocr = ocrPdf(pdfPath);
+          const ocrText = [ocr.layoutText, ocr.blockText].join("\n");
+          log.push({
+            pdf: pdfName,
+            phase: "ocr_fallback",
+            status: "aplicado",
+            value: {
+              pdfParseCharacters: text.length,
+              ocrCharacters: ocrText.length,
+            },
+          });
+          documentType = classifyDocument(ocrText);
+          if (documentType === 'F08D') {
+            const candidates = [
+              { source: 'pdf-parse', fields: extractFormulario08(text, pdfName, []) },
+              { source: 'tesseract-psm11', fields: extractFormulario08(ocr.layoutText, pdfName, []) },
+              { source: 'tesseract-psm3', fields: extractFormulario08(ocr.blockText, pdfName, []) },
+            ];
+            rowData = mergeFieldCandidates(candidates, pdfName, log);
+          } else {
+            rowData = extractFormulario08Partial(ocrText, pdfName, log);
+          }
+          ocrUsed = true;
+        } catch (error) {
+          log.push({ pdf: pdfName, phase: "ocr_fallback", status: "error", value: error.message });
+          throw new Error(`no se pudo ejecutar el fallback OCR local (${error.message})`);
+        }
+      } else {
+        log.push({
+          pdf: pdfName,
+          phase: "ocr_fallback",
+          status: "omitido",
+          value: { pdfParseCharacters: text.length, quality: textQuality, threshold: OCR_TEXT_THRESHOLD },
+        });
+      }
       log.push({
         pdf: pdfName,
         phase: "classification",
@@ -1328,10 +1486,11 @@ async function main() {
         value: documentType === "F08D" ? "extraccion completa" : "documento manuscrito - extracción parcial",
       });
 
-      const rowData =
-        documentType === "F08D"
+      if (!ocrUsed) {
+        rowData = documentType === "F08D"
           ? extractFormulario08(text, pdfName, log)
           : extractFormulario08Partial(text, pdfName, log);
+      }
       rowData.__source = pdfName;
       rowData.__documentType = documentType;
 

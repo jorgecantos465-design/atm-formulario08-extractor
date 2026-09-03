@@ -4,20 +4,21 @@ MVP deterministico para leer Formularios 08 digitales y completar una copia de u
 
 ## Alcance arquitectonico
 
-Este repositorio procesa exclusivamente PDFs digitales con texto embebido.
+Este repositorio procesa exclusivamente Formularios 08 digitales. Si su capa de texto esta vacia o degradada, aplica OCR local sobre las paginas renderizadas; esto no convierte al documento en manuscrito.
 
 Pipeline permitido:
 
 ```text
-PDF digital -> pdf-parse -> normalizacion -> regex/parser -> mapeo -> plantilla de salida
+PDF digital -> pdf-parse -> calidad GOOD -> parser digital -> plantilla de salida
+                         -> calidad DEGRADED/EMPTY -> Poppler + Tesseract -> parser digital -> plantilla de salida
 ```
 
 Reglas obligatorias:
 
 - No usar OpenAI Vision ni modelos multimodales.
 - No usar servicios de IA paga.
-- No incorporar OCR para formularios manuscritos.
-- Mantener extraccion deterministica mediante `pdf-parse`, regex y parser.
+- No usar el fallback OCR para incorporar soporte de formularios manuscritos.
+- Mantener extraccion deterministica mediante `pdf-parse`, OCR local, regex y parser.
 - Derivar formularios manuscritos o escaneados a `atm-formulario08-extractor-manuscrito`.
 
 ## Estructura
@@ -36,6 +37,8 @@ npm run extractor
 ```
 
 `npm run extract-f08` queda como alias compatible.
+
+El fallback requiere `pdftoppm` de Poppler y Tesseract instalados localmente. El extractor los busca en `PATH`, en las instalaciones habituales de WinGet/Windows o en las variables `PDFTOPPM_PATH` y `TESSERACT_PATH`. No descarga dependencias ni realiza llamadas de red.
 
 ## Reglas del MVP
 
@@ -57,7 +60,7 @@ npm run extractor
 - `@email@`: email en minusculas.
 - `@atributo9@`: nombre completo adquirente.
 - `@atributo14@`: numero de Formulario 08.
-- `@atributo15@`: dominio validado como `ABC123` o `AB123CD`.
+- `@atributo15@`: dominio validado como `ABC123`, `123ABC` o `AB123CD`.
 - `@atributo16@`: domicilio legal o, si falta, domicilio real.
 - `@atributo17@`: fecha de impresion `DD/MM/AAAA`.
 - `@atributo18@`: modelo.
