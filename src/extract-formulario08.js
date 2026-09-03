@@ -600,6 +600,15 @@ function extractDomicilioAdquirente(buyerSection) {
   );
 }
 
+function extractFormulario08Number(text) {
+  const source = compactText(text);
+  const labeledNumber = source.match(/\bN\s*[°º]\s*((?:\d[\s.-]*){9}\d)/i);
+  if (labeledNumber) return labeledNumber[1].replace(/\D/g, '');
+
+  const explicitForm = source.match(/(?:FORMULARIO\s*0?8|F\.?\s*0?8)[^\d]{0,30}((?:\d[\s.-]*){9}\d)/i);
+  return explicitForm ? explicitForm[1].replace(/\D/g, '') : '';
+}
+
 function extractFechaImpresion08Strict(sectionA) {
   const lines = linesOf(sectionA);
   for (let index = 0; index < lines.length; index += 1) {
@@ -891,11 +900,7 @@ function extractFormulario08(text, pdfName, log) {
   const fullBuyerName = [apellido, nombre].filter(Boolean).join(" ");
   const email = extractEmail(buyerSection) || extractEmail(sellerSection) || extractEmail(normalized);
 
-  const headerText = linesOf(normalized).slice(0, 20).join(" ");
-  const form08Raw =
-    firstMatch(headerText, /N\s*[°oº]\s*([0-9][0-9 .-]{4,})/i) ||
-    firstMatch(headerText, /(?:FORMULARIO\s*0?8|F\.?\s*0?8)[^\d]{0,30}([0-9][0-9 .-]{4,})/i);
-  const formulario08 = form08Raw.replace(/\D/g, "").replace(/^0+/, "");
+  const formulario08 = extractFormulario08Number(normalized);
 
   const dominio = extractDomain(normalized, sectionA);
   const domicilio = extractDomicilioAdquirente(buyerSection);
@@ -1425,6 +1430,14 @@ function runNormalizerTests() {
   assert.equal(isGeneratedOdsName('Modelo Resolucion General_completado_20260903-081148.ods', odsTemplate), true);
   assert.equal(isGeneratedOdsName('resultado_manual.ods', odsTemplate), false);
   assert.equal(isGeneratedOdsName('Modelo Resolucion General_completado_20260903-081148.xlsx', odsTemplate), false);
+  assert.equal(extractFormulario08Number('N° 006243982 3'), '0062439823');
+  assert.equal(extractFormulario08Number('Nº 006243982 3'), '0062439823');
+  assert.equal(extractFormulario08Number('N°0062439823'), '0062439823');
+  assert.equal(extractFormulario08Number('N° 0 0 6 2 4 3 9 8 2 3'), '0062439823');
+  const formNumberCell = makeOdsCell(extractFormulario08Number('N° 006243982 3'), '@atributo14@');
+  assert.match(formNumberCell, /office:value-type="string"/);
+  assert.match(formNumberCell, /<text:p>0062439823<\/text:p>/);
+  assert.doesNotMatch(formNumberCell, />62439823</);
 
   assert.equal(cleanCuit("20-13149070-5"), "20-13149070-5");
   assert.equal(cleanCuit("20-I3I49070-S"), "20-13149070-5");
