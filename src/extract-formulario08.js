@@ -657,14 +657,13 @@ function valueBetweenFlexibleLabels(text, labelRegex, stopRegexes) {
 }
 
 function extractModel(sectionA) {
-  const modelLabel = /(?:M[o0]d[e3][l1I][o0©]|ModeIo|Mode1o|Modeto|Modelo)\s*:?\s*/i;
+  const modelLabel = /\b(?:M[o0]d[e3][l1I][o0]|ModeIo|Mode1o|Modeto)\s*:\s*/i;
   const nextVehicleLabel = [
     /N.mero\s+Cha\b/i,
-    /(?:A(?:ñ|n|fi|fl|f|Ã±)i?o|Anio|Aflo)\s*:?\s*/i,
-    /N[uú]mero\s+Motor\s*:?\s*/i,
-    /Numero\s+Motor\s*:?\s*/i,
-    /N[uú]mero\s+Cha(?:s|l)s(?:is)?\s*:?\s*/i,
-    /Numero\s+Cha(?:s|l)s(?:is)?\s*:?\s*/i,
+    /\bA(?:ño|no|nio|fio|fie|flo)\s*:\s*/i,
+    /\bN[uú]mero\s+(?:Motor|Cha[^:\s]*)\s*:\s*/i,
+    /\b(?:Dominio|Marca|Tipo|Concepto|Monto\s+Operaci[oó]n|Uso)\s*:\s*/i,
+    /\bCOMPRADORES?\s+ADQUIRENTE/i,
   ];
   const byLabel = valueBetweenFlexibleLabels(sectionA, modelLabel, nextVehicleLabel);
   if (byLabel) return cleanVehicleValue(byLabel);
@@ -905,7 +904,7 @@ function extractFormulario08(text, pdfName, log) {
   const dominio = extractDomain(normalized, sectionA);
   const domicilio = extractDomicilioAdquirente(buyerSection);
   const fecha = extractFechaImpresion08Strict(sectionA);
-  const marcaModelo = extractModel(sectionA);
+  const marcaModelo = extractModel(sectionA) || extractModel(normalized);
   const anio = extractYear(sectionA);
 
   const sellerCuit = extractSellerCuit(sellerSection);
@@ -1249,10 +1248,17 @@ function makeOdsCell(value, placeholder) {
     const [day, month, year] = normalizedDate.split("/");
     const isoDate = `${year}-${month}-${day}`;
     const text = escapeXml(normalizedDate);
-    return `<table:table-cell office:value-type="date" office:date-value="${isoDate}" calcext:value-type="date"><text:p>${text}</text:p></table:table-cell>`;
+    return `<table:table-cell table:style-name="F08DateCell" office:value-type="date" office:date-value="${isoDate}" calcext:value-type="date"><text:p>${text}</text:p></table:table-cell>`;
   }
   const text = escapeXml(value);
   return `<table:table-cell office:value-type="string" calcext:value-type="string"><text:p>${text}</text:p></table:table-cell>`;
+}
+
+function ensureOdsDateStyle(contentXml) {
+  if (/style:name="F08DateCell"/.test(contentXml)) return contentXml;
+  const dateStyle = '<number:date-style style:name="F08DateFormat"><number:day number:style="long"/><number:text>/</number:text><number:month number:style="long"/><number:text>/</number:text><number:year number:style="long"/></number:date-style>';
+  const cellStyle = '<style:style style:name="F08DateCell" style:family="table-cell" style:data-style-name="F08DateFormat"/>';
+  return contentXml.replace('<office:automatic-styles>', `<office:automatic-styles>${dateStyle}${cellStyle}`);
 }
 
 function isGeneratedOdsName(name, templatePath) {
@@ -1386,6 +1392,8 @@ async function writeOdsWorkbook(templatePath, rowsData, log) {
         newContentXml.slice(replacement.start + replacement.oldXml.length);
     });
 
+  newContentXml = ensureOdsDateStyle(newContentXml);
+
   zip.file("content.xml", newContentXml);
   const ext = path.extname(templatePath);
   const base = path.basename(templatePath, ext);
@@ -1425,7 +1433,20 @@ function runNormalizerTests() {
   const dateCell = makeOdsCell('03/07/2026', OSD_DATE_PLACEHOLDER);
   assert.match(dateCell, /office:value-type="date"/);
   assert.match(dateCell, /office:date-value="2026-07-03"/);
+  assert.match(dateCell, /table:style-name="F08DateCell"/);
   assert.doesNotMatch(dateCell, /<text:p>'/);
+  const styledContent = ensureOdsDateStyle('<office:automatic-styles></office:automatic-styles>');
+  assert.match(styledContent, /number:date-style style:name="F08DateFormat"/);
+  assert.match(styledContent, /number:day number:style="long"/);
+  assert.match(styledContent, /number:month number:style="long"/);
+  assert.match(styledContent, /number:year number:style="long"/);
+  assert.doesNotMatch(styledContent, /number:hours|number:minutes|number:seconds/);
+  assert.equal(extractModel('Modelo: SANDERO STEPWAY CONFORT 1.5DCI Año: 2009'), 'SANDERO STEPWAY CONFORT 1.5DCI');
+  assert.equal(extractModel('Modelo:\nSANDERO STEPWAY CONFORT 1.5DCI\nNúmero Motor: K9KK790D083612'), 'SANDERO STEPWAY CONFORT 1.5DCI');
+  assert.equal(extractModel('Modelo: SANDERO STEPWAY CONFORT 1.5DCI Número Chasis: 93YBSR2JKAJ279287'), 'SANDERO STEPWAY CONFORT 1.5DCI');
+  const reorderedPdfText = 'CONDICIONES GENERALES COMPRADORES ADQUIRENTE/S Datos del comprador Modelo: SANDERO STEPWAY CONFORT 1.5DCI Año: 2009';
+  const reorderedSectionA = findSectionFromLines(reorderedPdfText, [/CONDICION/], [/COMPRADORES?\s+ADQUIRENTE/]);
+  assert.equal(extractModel(reorderedSectionA) || extractModel(reorderedPdfText), 'SANDERO STEPWAY CONFORT 1.5DCI');
   const odsTemplate = path.join(TEMPLATE_DIR, 'Modelo Resolucion General.ods');
   assert.equal(isGeneratedOdsName('Modelo Resolucion General_completado_20260903-081148.ods', odsTemplate), true);
   assert.equal(isGeneratedOdsName('resultado_manual.ods', odsTemplate), false);
