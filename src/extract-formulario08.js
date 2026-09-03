@@ -575,12 +575,17 @@ function extractAddressByLabel(text, labelRegex) {
     if (!label) continue;
 
     const parts = [line.slice(label.index + label[0].length).trim()];
-    const nextLine = lines[index + 1] || "";
-    if (
-      nextLine &&
-      !/^(Dom.?cilio|CUIT|Email|D\.?N\.?I\.?|Sexo|Ocupaci[oó0d]n|Nacionalidad|Fecha de Nac)\b/i.test(nextLine)
-    ) {
-      parts.push(nextLine.trim());
+    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+      const nextLine = lines[nextIndex];
+      if (
+        nextLine &&
+        !/^(Dom.?cilio|CUIT|Email|D\.?N\.?I\.?|Sexo|Ocupaci[oó0d]n|Nacionalidad|Fecha de Nac|TE|Estado Civil|C[oó0d]nyuge|Marca)\b/i.test(nextLine)
+      ) {
+        parts.push(nextLine.trim());
+        if (/\bS\s*\/\s*N\s*$/i.test(nextLine)) break;
+        continue;
+      }
+      break;
     }
     return cleanAddress(parts.join(" "));
   }
@@ -1235,11 +1240,29 @@ function makeOdsCell(value, placeholder) {
     return `<table:table-cell office:value-type="float" office:value="${value}" calcext:value-type="float"><text:p>${value}</text:p></table:table-cell>`;
   }
   if (DATE_PLACEHOLDERS.has(placeholder)) {
-    const text = escapeXml(normalize_date(value));
-    return `<table:table-cell office:value-type="string" calcext:value-type="string"><text:p>${text}</text:p></table:table-cell>`;
+    const normalizedDate = normalize_date(value);
+    const [day, month, year] = normalizedDate.split("/");
+    const isoDate = `${year}-${month}-${day}`;
+    const text = escapeXml(normalizedDate);
+    return `<table:table-cell office:value-type="date" office:date-value="${isoDate}" calcext:value-type="date"><text:p>${text}</text:p></table:table-cell>`;
   }
   const text = escapeXml(value);
   return `<table:table-cell office:value-type="string" calcext:value-type="string"><text:p>${text}</text:p></table:table-cell>`;
+}
+
+function isGeneratedOdsName(name, templatePath) {
+  const ext = path.extname(templatePath);
+  const base = path.basename(templatePath, ext);
+  const escapedBase = base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escapedBase}_completado_\\d{8}-\\d{6}\\.ods$`, "i").test(name);
+}
+
+function removePreviousGeneratedOds(templatePath) {
+  for (const name of fs.readdirSync(OUTPUT_DIR)) {
+    if (isGeneratedOdsName(name, templatePath)) {
+      fs.unlinkSync(path.join(OUTPUT_DIR, name));
+    }
+  }
 }
 
 function writeOdsDataRow(targetRow, rowData, columns, targetRowNumber, log) {
@@ -1363,6 +1386,7 @@ async function writeOdsWorkbook(templatePath, rowsData, log) {
   const base = path.basename(templatePath, ext);
   const outPath = path.join(OUTPUT_DIR, `${base}_completado_${nowStamp()}${ext}`);
   const outBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+  removePreviousGeneratedOds(templatePath);
   fs.writeFileSync(outPath, outBuffer);
   return outPath;
 }
@@ -1377,6 +1401,30 @@ function runNormalizerTests() {
   assert.equal(evaluateTextQuality(''), 'EMPTY');
   assert.equal(evaluateTextQuality(degradedDigital), 'DEGRADED');
   assert.equal(evaluateTextQuality(`${degradedDigital} ${'texto '.repeat(200)}`), 'GOOD');
+  const multilineAddress = [
+    'Domicilio',
+    'Legal:',
+    'MANZ',
+    'D',
+    'CASA',
+    '9',
+    'B°',
+    'MANCAYARES',
+    'S/N',
+    'COQUIMBITO',
+    'MAIPU',
+    'MENDOZA',
+    'Domicilio Real:',
+  ].join('\n');
+  assert.equal(extractAddressByLabel(multilineAddress, /Legal\s*:\s*/i), 'MANZ D CASA 9 B° MANCAYARES S/N');
+  const dateCell = makeOdsCell('03/07/2026', OSD_DATE_PLACEHOLDER);
+  assert.match(dateCell, /office:value-type="date"/);
+  assert.match(dateCell, /office:date-value="2026-07-03"/);
+  assert.doesNotMatch(dateCell, /<text:p>'/);
+  const odsTemplate = path.join(TEMPLATE_DIR, 'Modelo Resolucion General.ods');
+  assert.equal(isGeneratedOdsName('Modelo Resolucion General_completado_20260903-081148.ods', odsTemplate), true);
+  assert.equal(isGeneratedOdsName('resultado_manual.ods', odsTemplate), false);
+  assert.equal(isGeneratedOdsName('Modelo Resolucion General_completado_20260903-081148.xlsx', odsTemplate), false);
 
   assert.equal(cleanCuit("20-13149070-5"), "20-13149070-5");
   assert.equal(cleanCuit("20-I3I49070-S"), "20-13149070-5");
